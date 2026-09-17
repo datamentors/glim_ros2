@@ -38,6 +38,7 @@ public:
 
   void wait(bool auto_quit = false);
   void save(const std::string& path);
+  std::string dump_path() const;
 
   const std::vector<std::shared_ptr<GenericTopicSubscription>>& extension_subscriptions();
 
@@ -54,6 +55,8 @@ private:
   double points_time_offset;
   double acc_scale;
   bool dump_on_unload;
+  bool saved;
+  std::string dump_path_;
 
   std::string intensity_field, ring_field;
 
