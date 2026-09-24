@@ -204,6 +204,241 @@ std::string create_effective_config_from_ros_params(
     declare_and_get<double>(node, "sensors.perpoint_time_scale", sensors.value("perpoint_time_scale", 1.0));
   save_json(effective_path / "config_sensors.json", config_sensors);
 
+  auto config_logging = load_json(effective_path / "config_logging.json");
+  auto& logging = config_logging["logging"];
+  logging["log_dir"] =
+    declare_and_get<std::string>(node, "logging.log_dir", logging.value("log_dir", "/tmp/glim_log"));
+  logging["save_logs"] =
+    declare_and_get<bool>(node, "logging.save_logs", logging.value("save_logs", false));
+  logging["rotate_logs"] =
+    declare_and_get<bool>(node, "logging.rotate_logs", logging.value("rotate_logs", false));
+  save_json(effective_path / "config_logging.json", config_logging);
+
+  auto config_odometry = load_json(effective_path / "config_odometry.json");
+  auto& odometry_estimation = config_odometry["odometry_estimation"];
+  odometry_estimation["so_name"] =
+    declare_and_get<std::string>(node, "odometry_estimation.so_name", odometry_estimation.value("so_name", "libodometry_estimation_cpu.so"));
+  odometry_estimation["est_window_topic"] =
+    declare_and_get<std::string>(node, "odometry_estimation.est_window_topic", odometry_estimation.value("est_window_topic", "/est_window"));
+  odometry_estimation["start_time_topic"] =
+    declare_and_get<std::string>(node, "odometry_estimation.start_time_topic", odometry_estimation.value("start_time_topic", "/start_time"));
+  odometry_estimation["coverage_timeout_ms"] =
+    declare_and_get<int>(node, "odometry_estimation.coverage_timeout_ms", odometry_estimation.value("coverage_timeout_ms", 150));
+  odometry_estimation["deskew_sample_dt"] =
+    declare_and_get<double>(node, "odometry_estimation.deskew_sample_dt", odometry_estimation.value("deskew_sample_dt", 0.01));
+  odometry_estimation["covariance_estimation_num_threads"] =
+    declare_and_get<int>(node, "odometry_estimation.covariance_estimation_num_threads", odometry_estimation.value("covariance_estimation_num_threads", 4));
+  odometry_estimation["voxel_resolution"] =
+    declare_and_get<double>(node, "odometry_estimation.voxel_resolution", odometry_estimation.value("voxel_resolution", 0.5));
+  odometry_estimation["voxelmap_levels"] =
+    declare_and_get<int>(node, "odometry_estimation.voxelmap_levels", odometry_estimation.value("voxelmap_levels", 2));
+  odometry_estimation["voxelmap_scaling_factor"] =
+    declare_and_get<double>(node, "odometry_estimation.voxelmap_scaling_factor", odometry_estimation.value("voxelmap_scaling_factor", 2.0));
+  save_json(effective_path / "config_odometry.json", config_odometry);
+
+  // Fields NOT listed here (so_name, enable_imu, registration_error_factor_type,
+  // isam2_relinearize_skip, gpu_memory_offload_mb) genuinely differ between G1's
+  // mapping and localization profiles -- overridable for completeness, but no
+  // robots/*/pulse.yaml should set a single static value for them, since one
+  // profile's value would silently leak into the other whenever config_path
+  // switches (they share one glim_ros node parameter block).
+  auto config_global_mapping = load_json(effective_path / "config_global_mapping.json");
+  auto& global_mapping = config_global_mapping["global_mapping"];
+  global_mapping["so_name"] =
+    declare_and_get<std::string>(node, "global_mapping.so_name", global_mapping.value("so_name", "libglobal_mapping.so"));
+  global_mapping["enable_imu"] =
+    declare_and_get<bool>(node, "global_mapping.enable_imu", global_mapping.value("enable_imu", true));
+  global_mapping["enable_optimization"] =
+    declare_and_get<bool>(node, "global_mapping.enable_optimization", global_mapping.value("enable_optimization", true));
+  global_mapping["init_pose_damping_scale"] =
+    declare_and_get<double>(node, "global_mapping.init_pose_damping_scale", global_mapping.value("init_pose_damping_scale", 1e10));
+  global_mapping["create_between_factors"] =
+    declare_and_get<bool>(node, "global_mapping.create_between_factors", global_mapping.value("create_between_factors", true));
+  global_mapping["between_registration_type"] =
+    declare_and_get<std::string>(node, "global_mapping.between_registration_type", global_mapping.value("between_registration_type", "GICP"));
+  global_mapping["registration_error_factor_type"] =
+    declare_and_get<std::string>(node, "global_mapping.registration_error_factor_type", global_mapping.value("registration_error_factor_type", "VGICP"));
+  global_mapping["randomsampling_rate"] =
+    declare_and_get<double>(node, "global_mapping.randomsampling_rate", global_mapping.value("randomsampling_rate", 1.0));
+  global_mapping["submap_voxel_resolution"] =
+    declare_and_get<double>(node, "global_mapping.submap_voxel_resolution", global_mapping.value("submap_voxel_resolution", 1.0));
+  global_mapping["submap_voxel_resolution_max"] =
+    declare_and_get<double>(node, "global_mapping.submap_voxel_resolution_max", global_mapping.value("submap_voxel_resolution_max", 1.0));
+  global_mapping["submap_voxel_resolution_dmin"] =
+    declare_and_get<double>(node, "global_mapping.submap_voxel_resolution_dmin", global_mapping.value("submap_voxel_resolution_dmin", 5.0));
+  global_mapping["submap_voxel_resolution_dmax"] =
+    declare_and_get<double>(node, "global_mapping.submap_voxel_resolution_dmax", global_mapping.value("submap_voxel_resolution_dmax", 20.0));
+  global_mapping["submap_voxelmap_levels"] =
+    declare_and_get<int>(node, "global_mapping.submap_voxelmap_levels", global_mapping.value("submap_voxelmap_levels", 2));
+  global_mapping["submap_voxelmap_scaling_factor"] =
+    declare_and_get<double>(node, "global_mapping.submap_voxelmap_scaling_factor", global_mapping.value("submap_voxelmap_scaling_factor", 2.0));
+  global_mapping["max_implicit_loop_distance"] =
+    declare_and_get<double>(node, "global_mapping.max_implicit_loop_distance", global_mapping.value("max_implicit_loop_distance", 100.0));
+  global_mapping["min_implicit_loop_overlap"] =
+    declare_and_get<double>(node, "global_mapping.min_implicit_loop_overlap", global_mapping.value("min_implicit_loop_overlap", 0.1));
+  global_mapping["use_isam2_dogleg"] =
+    declare_and_get<bool>(node, "global_mapping.use_isam2_dogleg", global_mapping.value("use_isam2_dogleg", false));
+  global_mapping["isam2_relinearize_skip"] =
+    declare_and_get<int>(node, "global_mapping.isam2_relinearize_skip", global_mapping.value("isam2_relinearize_skip", 1));
+  global_mapping["isam2_relinearize_thresh"] =
+    declare_and_get<double>(node, "global_mapping.isam2_relinearize_thresh", global_mapping.value("isam2_relinearize_thresh", 0.1));
+  global_mapping["gpu_memory_offload_mb"] =
+    declare_and_get<int>(node, "global_mapping.gpu_memory_offload_mb", global_mapping.value("gpu_memory_offload_mb", 0));
+  // localization.* only means anything to libglobal_mapping_reloc.so - harmless
+  // (unused) clutter in config_global_mapping.json when so_name selects the
+  // plain libglobal_mapping.so instead, so it's fine to always write it out.
+  auto& localization = config_global_mapping["localization"];
+  localization["max_localization_distance"] =
+    declare_and_get<double>(node, "localization.max_localization_distance", localization.value("max_localization_distance", 5.0));
+  localization["min_localization_overlap"] =
+    declare_and_get<double>(node, "localization.min_localization_overlap", localization.value("min_localization_overlap", 0.1));
+  localization["linear_search_window"] =
+    declare_and_get<double>(node, "localization.linear_search_window", localization.value("linear_search_window", 6.0));
+  localization["angular_search_window"] =
+    declare_and_get<double>(node, "localization.angular_search_window", localization.value("angular_search_window", 0.1));
+  localization["relocalization_factor_weight"] =
+    declare_and_get<double>(node, "localization.relocalization_factor_weight", localization.value("relocalization_factor_weight", 1e2));
+  localization["loc_between_factor_weight"] =
+    declare_and_get<double>(node, "localization.loc_between_factor_weight", localization.value("loc_between_factor_weight", 1e2));
+  localization["num_keep_submaps"] =
+    declare_and_get<int>(node, "localization.num_keep_submaps", localization.value("num_keep_submaps", 3));
+  localization["max_localization_submaps"] =
+    declare_and_get<int>(node, "localization.max_localization_submaps", localization.value("max_localization_submaps", 4));
+  localization["prebuilt_submap_pin_precision"] =
+    declare_and_get<double>(node, "localization.prebuilt_submap_pin_precision", localization.value("prebuilt_submap_pin_precision", 1e8));
+  save_json(effective_path / "config_global_mapping.json", config_global_mapping);
+
+  // Fields NOT listed here (distance_far_thresh, downsample_resolution,
+  // random_downsample_target) genuinely differ between G1's mapping and
+  // localization profiles - see the global_mapping note above.
+  auto config_preprocess = load_json(effective_path / "config_preprocess.json");
+  auto& preprocess = config_preprocess["preprocess"];
+  preprocess["distance_near_thresh"] =
+    declare_and_get<double>(node, "preprocess.distance_near_thresh", preprocess.value("distance_near_thresh", 1.0));
+  preprocess["use_random_grid_downsampling"] =
+    declare_and_get<bool>(node, "preprocess.use_random_grid_downsampling", preprocess.value("use_random_grid_downsampling", false));
+  preprocess["random_downsample_rate"] =
+    declare_and_get<double>(node, "preprocess.random_downsample_rate", preprocess.value("random_downsample_rate", 0.1));
+  preprocess["enable_outlier_removal"] =
+    declare_and_get<bool>(node, "preprocess.enable_outlier_removal", preprocess.value("enable_outlier_removal", false));
+  preprocess["outlier_removal_k"] =
+    declare_and_get<int>(node, "preprocess.outlier_removal_k", preprocess.value("outlier_removal_k", 10));
+  preprocess["outlier_std_mul_factor"] =
+    declare_and_get<double>(node, "preprocess.outlier_std_mul_factor", preprocess.value("outlier_std_mul_factor", 1.0));
+  preprocess["enable_cropbox_filter"] =
+    declare_and_get<bool>(node, "preprocess.enable_cropbox_filter", preprocess.value("enable_cropbox_filter", false));
+  preprocess["k_correspondences"] =
+    declare_and_get<int>(node, "preprocess.k_correspondences", preprocess.value("k_correspondences", 10));
+  preprocess["num_threads"] =
+    declare_and_get<int>(node, "preprocess.num_threads", preprocess.value("num_threads", 4));
+  save_json(effective_path / "config_preprocess.json", config_preprocess);
+
+  // registration_error_factor_type genuinely differs between G1's mapping and
+  // localization profiles - see the global_mapping note above.
+  auto config_sub_mapping = load_json(effective_path / "config_sub_mapping.json");
+  auto& sub_mapping = config_sub_mapping["sub_mapping"];
+  sub_mapping["so_name"] =
+    declare_and_get<std::string>(node, "sub_mapping.so_name", sub_mapping.value("so_name", "libsub_mapping.so"));
+  sub_mapping["enable_imu"] =
+    declare_and_get<bool>(node, "sub_mapping.enable_imu", sub_mapping.value("enable_imu", true));
+  sub_mapping["enable_optimization"] =
+    declare_and_get<bool>(node, "sub_mapping.enable_optimization", sub_mapping.value("enable_optimization", false));
+  sub_mapping["max_num_keyframes"] =
+    declare_and_get<int>(node, "sub_mapping.max_num_keyframes", sub_mapping.value("max_num_keyframes", 15));
+  sub_mapping["keyframe_update_strategy"] =
+    declare_and_get<std::string>(node, "sub_mapping.keyframe_update_strategy", sub_mapping.value("keyframe_update_strategy", "OVERLAP"));
+  sub_mapping["keyframe_update_min_points"] =
+    declare_and_get<int>(node, "sub_mapping.keyframe_update_min_points", sub_mapping.value("keyframe_update_min_points", 500));
+  sub_mapping["keyframe_update_interval_rot"] =
+    declare_and_get<double>(node, "sub_mapping.keyframe_update_interval_rot", sub_mapping.value("keyframe_update_interval_rot", 0.5));
+  sub_mapping["keyframe_update_interval_trans"] =
+    declare_and_get<double>(node, "sub_mapping.keyframe_update_interval_trans", sub_mapping.value("keyframe_update_interval_trans", 0.2));
+  sub_mapping["max_keyframe_overlap"] =
+    declare_and_get<double>(node, "sub_mapping.max_keyframe_overlap", sub_mapping.value("max_keyframe_overlap", 0.9));
+  sub_mapping["create_between_factors"] =
+    declare_and_get<bool>(node, "sub_mapping.create_between_factors", sub_mapping.value("create_between_factors", true));
+  sub_mapping["between_registration_type"] =
+    declare_and_get<std::string>(node, "sub_mapping.between_registration_type", sub_mapping.value("between_registration_type", "GICP"));
+  sub_mapping["registration_error_factor_type"] =
+    declare_and_get<std::string>(node, "sub_mapping.registration_error_factor_type", sub_mapping.value("registration_error_factor_type", "VGICP"));
+  sub_mapping["keyframe_randomsampling_rate"] =
+    declare_and_get<double>(node, "sub_mapping.keyframe_randomsampling_rate", sub_mapping.value("keyframe_randomsampling_rate", 1.0));
+  sub_mapping["keyframe_voxel_resolution"] =
+    declare_and_get<double>(node, "sub_mapping.keyframe_voxel_resolution", sub_mapping.value("keyframe_voxel_resolution", 0.2));
+  sub_mapping["keyframe_voxelmap_levels"] =
+    declare_and_get<int>(node, "sub_mapping.keyframe_voxelmap_levels", sub_mapping.value("keyframe_voxelmap_levels", 2));
+  sub_mapping["keyframe_voxelmap_scaling_factor"] =
+    declare_and_get<double>(node, "sub_mapping.keyframe_voxelmap_scaling_factor", sub_mapping.value("keyframe_voxelmap_scaling_factor", 2.0));
+  sub_mapping["submap_downsample_resolution"] =
+    declare_and_get<double>(node, "sub_mapping.submap_downsample_resolution", sub_mapping.value("submap_downsample_resolution", 0.1));
+  sub_mapping["submap_voxel_resolution"] =
+    declare_and_get<double>(node, "sub_mapping.submap_voxel_resolution", sub_mapping.value("submap_voxel_resolution", 0.5));
+  sub_mapping["submap_target_num_points"] =
+    declare_and_get<int>(node, "sub_mapping.submap_target_num_points", sub_mapping.value("submap_target_num_points", 50000));
+  save_json(effective_path / "config_sub_mapping.json", config_sub_mapping);
+
+  // glim_relocalization's own config files - only present at all when
+  // config_path points at a localization profile (copy_config_directory()
+  // only copies whatever the profile directory actually contains). glim_ros
+  // has no other business knowing this package's schema, but this is the
+  // only point in the whole pipeline with both ROS node access and control
+  // over the effective config directory before GlobalConfig locks in -
+  // BBS3DExtension/LocalizationReloc read their config at construction time,
+  // before an extension module ever gets a Node& (see create_subscriptions()).
+  const auto config_bbs3d_path = effective_path / "config_bbs3d.json";
+  if (boost::filesystem::exists(config_bbs3d_path)) {
+    auto config_bbs3d = load_json(config_bbs3d_path);
+    auto& bbs3d = config_bbs3d["bbs3d"];
+    bbs3d["reference_map_path"] =
+      declare_and_get<std::string>(node, "bbs3d.reference_map_path", bbs3d.value("reference_map_path", ""));
+    bbs3d["voxelmap_cache_path"] =
+      declare_and_get<std::string>(node, "bbs3d.voxelmap_cache_path", bbs3d.value("voxelmap_cache_path", ""));
+    bbs3d["min_level_res"] =
+      declare_and_get<double>(node, "bbs3d.min_level_res", bbs3d.value("min_level_res", 2.0));
+    bbs3d["max_level"] =
+      declare_and_get<int>(node, "bbs3d.max_level", bbs3d.value("max_level", 6));
+    bbs3d["score_threshold_pct"] =
+      declare_and_get<double>(node, "bbs3d.score_threshold_pct", bbs3d.value("score_threshold_pct", 0.0));
+    bbs3d["lidar_topic"] =
+      declare_and_get<std::string>(node, "bbs3d.lidar_topic", bbs3d.value("lidar_topic", "/lidar_points"));
+    bbs3d["min_src_frames"] =
+      declare_and_get<int>(node, "bbs3d.min_src_frames", bbs3d.value("min_src_frames", 5));
+    bbs3d["max_src_frames"] =
+      declare_and_get<int>(node, "bbs3d.max_src_frames", bbs3d.value("max_src_frames", 50));
+    bbs3d["max_src_points"] =
+      declare_and_get<int>(node, "bbs3d.max_src_points", bbs3d.value("max_src_points", 100000));
+    bbs3d["max_tar_points"] =
+      declare_and_get<int>(node, "bbs3d.max_tar_points", bbs3d.value("max_tar_points", 500000));
+    bbs3d["timeout_ms"] =
+      declare_and_get<int>(node, "bbs3d.timeout_ms", bbs3d.value("timeout_ms", 0));
+    bbs3d["publish_best_effort"] =
+      declare_and_get<bool>(node, "bbs3d.publish_best_effort", bbs3d.value("publish_best_effort", false));
+    bbs3d["best_effort_min_pct"] =
+      declare_and_get<double>(node, "bbs3d.best_effort_min_pct", bbs3d.value("best_effort_min_pct", 0.05));
+    bbs3d["map_frame_id"] =
+      declare_and_get<std::string>(node, "bbs3d.map_frame_id", bbs3d.value("map_frame_id", "ardia_map"));
+    bbs3d["odom_frame_id"] =
+      declare_and_get<std::string>(node, "bbs3d.odom_frame_id", bbs3d.value("odom_frame_id", "odom"));
+    bbs3d["source_frame_id"] =
+      declare_and_get<std::string>(node, "bbs3d.source_frame_id", bbs3d.value("source_frame_id", "ardia_map"));
+    bbs3d["force_planar_pose"] =
+      declare_and_get<bool>(node, "bbs3d.force_planar_pose", bbs3d.value("force_planar_pose", true));
+    bbs3d["invert_yaw"] =
+      declare_and_get<bool>(node, "bbs3d.invert_yaw", bbs3d.value("invert_yaw", false));
+    bbs3d["roll_pitch_search_rad"] =
+      declare_and_get<double>(node, "bbs3d.roll_pitch_search_rad", bbs3d.value("roll_pitch_search_rad", 0.0));
+    save_json(config_bbs3d_path, config_bbs3d);
+  }
+
+  const auto config_global_mapping_reloc_path = effective_path / "config_global_mapping_reloc.json";
+  if (boost::filesystem::exists(config_global_mapping_reloc_path)) {
+    auto config_global_mapping_reloc = load_json(config_global_mapping_reloc_path);
+    auto& global_mapping_reloc = config_global_mapping_reloc["global_mapping_reloc"];
+    global_mapping_reloc["reference_map_path"] =
+      declare_and_get<std::string>(node, "global_mapping_reloc.reference_map_path", global_mapping_reloc.value("reference_map_path", ""));
+    save_json(config_global_mapping_reloc_path, config_global_mapping_reloc);
+  }
+
   return effective_path.string();
 }
 
