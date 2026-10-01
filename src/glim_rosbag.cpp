@@ -193,7 +193,7 @@ int main(int argc, char** argv) {
       if (!rclcpp::ok()) {
         return false;
       }
-      rclcpp::spin_some(glim);
+      rclcpp::spin_some(glim->get_node_base_interface());
 
       const auto msg = reader.read_next();
       const std::string topic_type = topic_type_map[msg->topic_name];
@@ -297,7 +297,7 @@ int main(int argc, char** argv) {
 
       const auto t0 = std::chrono::high_resolution_clock::now();
       while (glim->needs_wait()) {
-        rclcpp::spin_some(glim);
+        rclcpp::spin_some(glim->get_node_base_interface());
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         spdlog::debug("throttling (waiting for odometry estimation)");
         if (std::chrono::high_resolution_clock::now() - t0 > std::chrono::seconds(1)) {
@@ -327,7 +327,7 @@ int main(int argc, char** argv) {
   }
 
   if (!auto_quit) {
-    rclcpp::spin(glim);
+    rclcpp::spin(glim->get_node_base_interface());
   }
 
   glim->wait(auto_quit);

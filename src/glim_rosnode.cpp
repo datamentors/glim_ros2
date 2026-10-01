@@ -13,11 +13,23 @@ int main(int argc, char** argv) {
 
   auto glim = std::make_shared<glim::GlimROS>(options);
 
-  rclcpp::spin(glim);
-  rclcpp::shutdown();
+  rclcpp::spin(glim->get_node_base_interface());
+  // spin() also returns when on_activate()'s guard already called
+  // rclcpp::shutdown() itself (forcing a process exit) -- calling it again
+  // on an already-shutdown context throws, so only call it if still needed.
+  if (rclcpp::ok()) {
+    rclcpp::shutdown();
+  }
 
   std::string dump_path = "/tmp/dump";
-  glim->declare_parameter<std::string>("dump_path", dump_path);
+  // on_configure() already declares "dump_path" (it needs the value earlier,
+  // to set dump_path_) -- redeclaring it here threw
+  // ParameterAlreadyDeclaredException on any run that actually reaches this
+  // line, which nothing did until on_activate()'s guard started forcing a
+  // clean self-shutdown instead of leaving the node stuck inactive.
+  if (!glim->has_parameter("dump_path")) {
+    glim->declare_parameter<std::string>("dump_path", dump_path);
+  }
   glim->get_parameter<std::string>("dump_path", dump_path);
 
   glim->wait();

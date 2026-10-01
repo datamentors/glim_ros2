@@ -55,7 +55,7 @@ RvizViewer::~RvizViewer() {
   thread.join();
 }
 
-std::vector<GenericTopicSubscription::Ptr> RvizViewer::create_subscriptions(rclcpp::Node& node) {
+std::vector<GenericTopicSubscription::Ptr> RvizViewer::create_subscriptions(rclcpp_lifecycle::LifecycleNode& node) {
   tf_buffer = std::make_unique<tf2_ros::Buffer>(node.get_clock());
   tf_listener = std::make_unique<tf2_ros::TransformListener>(*tf_buffer);
   tf_broadcaster = std::make_unique<tf2_ros::TransformBroadcaster>(node);
@@ -89,6 +89,38 @@ std::vector<GenericTopicSubscription::Ptr> RvizViewer::create_subscriptions(rclc
   pose_scanend_corrected_pub = node.create_publisher<geometry_msgs::msg::PoseStamped>("~/pose_scanend_corrected", 10);
 
   return {};
+}
+
+void RvizViewer::on_activate() {
+  points_pub->on_activate();
+  aligned_points_pub->on_activate();
+  points_corrected_pub->on_activate();
+  aligned_points_corrected_pub->on_activate();
+  map_pub->on_activate();
+  odom_pub->on_activate();
+  pose_pub->on_activate();
+  odom_scanend_pub->on_activate();
+  pose_scanend_pub->on_activate();
+  odom_corrected_pub->on_activate();
+  pose_corrected_pub->on_activate();
+  odom_scanend_corrected_pub->on_activate();
+  pose_scanend_corrected_pub->on_activate();
+}
+
+void RvizViewer::on_deactivate() {
+  points_pub->on_deactivate();
+  aligned_points_pub->on_deactivate();
+  points_corrected_pub->on_deactivate();
+  aligned_points_corrected_pub->on_deactivate();
+  map_pub->on_deactivate();
+  odom_pub->on_deactivate();
+  pose_pub->on_deactivate();
+  odom_scanend_pub->on_deactivate();
+  pose_scanend_pub->on_deactivate();
+  odom_corrected_pub->on_deactivate();
+  pose_corrected_pub->on_deactivate();
+  odom_scanend_corrected_pub->on_deactivate();
+  pose_scanend_corrected_pub->on_deactivate();
 }
 
 void RvizViewer::set_callbacks() {
@@ -367,6 +399,23 @@ void RvizViewer::odometry_new_frame(const EstimationFrame::ConstPtr& new_frame, 
   auto& aligned_points_pub = !corrected ? this->aligned_points_pub : this->aligned_points_corrected_pub;
   if (aligned_points_pub->get_subscription_count()) {
     // Publish points aligned to the world frame to avoid some visualization issues in Rviz2
+    // (baking the transform into point coordinates instead of relying on RViz's
+    // own per-point TF lookup, which is what actually avoids the jitter this
+    // comment refers to).
+    //
+    // BUG FIX: new_frame->T_world_sensor() is RESPLE-bridge's own odometry
+    // pose -- the exact same pose published as the raw odom->base_frame_id TF
+    // (see the T_odom_imu block above). It has NO map correction in it. This
+    // used to be labeled map_frame_id regardless, which told RViz these points
+    // were already fully in the map frame -- so the entire map->odom
+    // correction (a large yaw plus the smaller residual pitch/roll bias) was
+    // silently missing from what got displayed, on top of whatever real
+    // localization error exists, making replay look far more broken than the
+    // actual localization result is. Label it as what it actually is
+    // (odom_frame_id); RViz's own live map->odom TF lookup (a single transform,
+    // not per-point, so it doesn't reintroduce the per-point jitter this
+    // pre-baking was meant to avoid) then correctly overlays it using the
+    // real, current correction.
     std::vector<Eigen::Vector4d> transformed(new_frame->frame->size());
     for (int i = 0; i < new_frame->frame->size(); i++) {
       transformed[i] = new_frame->T_world_sensor() * new_frame->frame->points[i];
@@ -378,7 +427,7 @@ void RvizViewer::odometry_new_frame(const EstimationFrame::ConstPtr& new_frame, 
     frame.times = new_frame->frame->times;
     frame.intensities = new_frame->frame->intensities;
 
-    auto points = frame_to_pointcloud2(map_frame_id, new_frame->stamp, frame);
+    auto points = frame_to_pointcloud2(odom_frame_id, new_frame->stamp, frame);
     aligned_points_pub->publish(*points);
 
     logger->debug("published aligned_points (stamp={} num_points={})", new_frame->stamp, frame.size());

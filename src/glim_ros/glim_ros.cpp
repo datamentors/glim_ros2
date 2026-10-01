@@ -6,6 +6,10 @@
 #include <fstream>
 #include <iomanip>
 #include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <optional>
+#include <future>
 #include <iostream>
 #include <functional>
 #include <stdexcept>
@@ -23,6 +27,12 @@
 #include <rclcpp_components/register_node_macro.hpp>
 #include <ament_index_cpp/get_package_prefix.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+
+#include <std_msgs/msg/int64.hpp>
+#include <lifecycle_msgs/srv/change_state.hpp>
+#include <lifecycle_msgs/srv/get_state.hpp>
+#include <lifecycle_msgs/msg/transition.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
 
 #include <sensor_msgs/msg/imu.hpp>
 #include <sensor_msgs/msg/image.hpp>
@@ -49,8 +59,13 @@ namespace glim {
 
 namespace {
 
+// Shared between ensure_resple_fresh_before_configuring() (reader) and
+// GlimROS::resple_start_time_changed_callback() (writer) -- see the comment
+// on kSyncedMarkerPath's use below for why this file exists at all.
+constexpr const char* kSyncedMarkerPath = "/tmp/glim_ros_synced_resple_start_time_ns";
+
 template <typename T>
-T declare_and_get(rclcpp::Node& node, const std::string& name, const T& default_value) {
+T declare_and_get(rclcpp_lifecycle::LifecycleNode& node, const std::string& name, const T& default_value) {
   if (!node.has_parameter(name)) {
     node.declare_parameter<T>(name, default_value);
   }
@@ -58,6 +73,26 @@ T declare_and_get(rclcpp::Node& node, const std::string& name, const T& default_
   T value = default_value;
   node.get_parameter(name, value);
   return value;
+}
+
+// For the handful of fields that genuinely differ between mapping and
+// localization mode (so_name, extension_modules -- everything else is
+// reconciled to one shared value, see robots/README.md). Declares BOTH
+// mode's parameters unconditionally under glim_profiles.<mode>.<field_name>
+// -- ROS2 requires a parameter be declared before use, and declaring the
+// inactive mode's value too is harmless, it's just never applied -- then
+// returns whichever one matches the live glim_mode.
+template <typename T>
+T declare_and_get_for_mode(
+  rclcpp_lifecycle::LifecycleNode& node,
+  const std::string& mode,
+  const std::string& field_name,
+  const T& mapping_default,
+  const T& localization_default)
+{
+  const T mapping_value = declare_and_get<T>(node, "glim_profiles.mapping." + field_name, mapping_default);
+  const T localization_value = declare_and_get<T>(node, "glim_profiles.localization." + field_name, localization_default);
+  return mode == "localization" ? localization_value : mapping_value;
 }
 
 nlohmann::json load_json(const boost::filesystem::path& path) {
@@ -97,7 +132,7 @@ void copy_config_directory(const boost::filesystem::path& src, const boost::file
 }
 
 std::string create_effective_config_from_ros_params(
-  rclcpp::Node& node,
+  rclcpp_lifecycle::LifecycleNode& node,
   const std::string& base_config_path)
 {
   const auto base_path = boost::filesystem::path(base_config_path);
@@ -105,6 +140,12 @@ std::string create_effective_config_from_ros_params(
     boost::filesystem::temp_directory_path() /
     ("glim_ros_" + std::string(node.get_name()) + "_" + std::to_string(getpid()));
   copy_config_directory(base_path, effective_path);
+
+  // Selects between glim_profiles.mapping.* and glim_profiles.localization.*
+  // for the handful of fields below that genuinely differ by mode (so_name,
+  // extension_modules) -- base_config_path itself no longer needs to point at
+  // a mode-specific directory; one shared template covers both modes now.
+  const std::string glim_mode = declare_and_get<std::string>(node, "glim_mode", "mapping");
 
   auto config_ros = load_json(effective_path / "config_ros.json");
   auto& glim_ros = config_ros["glim_ros"];
@@ -146,10 +187,13 @@ std::string create_effective_config_from_ros_params(
       glim_ros.value(
         "pose_corrected_odom_covariance_diag",
         std::vector<double>{0.01, 0.01, 0.01, 0.0025, 0.0025, 0.0025}));
+  // Which plugins load genuinely differs by mode: localization additionally
+  // needs the reloc-capable global_mapping plugin and BBS3D itself.
   glim_ros["extension_modules"] =
-    declare_and_get<std::vector<std::string>>(
-      node, "glim_ros.extension_modules",
-      glim_ros.value("extension_modules", std::vector<std::string>{"librviz_viewer.so"}));
+    declare_and_get_for_mode<std::vector<std::string>>(
+      node, glim_mode, "ros.extension_modules",
+      glim_ros.value("extension_modules", std::vector<std::string>{"librviz_viewer.so", "libresple_spline_extension.so"}),
+      std::vector<std::string>{"librviz_viewer.so", "libresple_spline_extension.so", "libglobal_mapping_reloc.so", "libglim_bbs3d.so"});
   glim_ros["image_topic"] =
     declare_and_get<std::string>(node, "glim_ros.image_topic", glim_ros.value("image_topic", "/image"));
   glim_ros["imu_topic"] =
@@ -223,7 +267,7 @@ std::string create_effective_config_from_ros_params(
   odometry_estimation["start_time_topic"] =
     declare_and_get<std::string>(node, "odometry_estimation.start_time_topic", odometry_estimation.value("start_time_topic", "/start_time"));
   odometry_estimation["coverage_timeout_ms"] =
-    declare_and_get<int>(node, "odometry_estimation.coverage_timeout_ms", odometry_estimation.value("coverage_timeout_ms", 150));
+    declare_and_get<int>(node, "odometry_estimation.coverage_timeout_ms", odometry_estimation.value("coverage_timeout_ms", 300));
   odometry_estimation["deskew_sample_dt"] =
     declare_and_get<double>(node, "odometry_estimation.deskew_sample_dt", odometry_estimation.value("deskew_sample_dt", 0.01));
   odometry_estimation["covariance_estimation_num_threads"] =
@@ -236,16 +280,18 @@ std::string create_effective_config_from_ros_params(
     declare_and_get<double>(node, "odometry_estimation.voxelmap_scaling_factor", odometry_estimation.value("voxelmap_scaling_factor", 2.0));
   save_json(effective_path / "config_odometry.json", config_odometry);
 
-  // Fields NOT listed here (so_name, enable_imu, registration_error_factor_type,
-  // isam2_relinearize_skip, gpu_memory_offload_mb) genuinely differ between G1's
-  // mapping and localization profiles -- overridable for completeness, but no
-  // robots/*/pulse.yaml should set a single static value for them, since one
-  // profile's value would silently leak into the other whenever config_path
-  // switches (they share one glim_ros node parameter block).
+  // so_name is the only global_mapping field that still genuinely differs by
+  // mode (reconciled all the others -- enable_imu, registration_error_factor_type,
+  // isam2_relinearize_skip, gpu_memory_offload_mb -- to one shared value each,
+  // see robots/README.md); handled the same mode-aware way as extension_modules
+  // above, not as a plain override below.
   auto config_global_mapping = load_json(effective_path / "config_global_mapping.json");
   auto& global_mapping = config_global_mapping["global_mapping"];
   global_mapping["so_name"] =
-    declare_and_get<std::string>(node, "global_mapping.so_name", global_mapping.value("so_name", "libglobal_mapping.so"));
+    declare_and_get_for_mode<std::string>(
+      node, glim_mode, "global_mapping.so_name",
+      global_mapping.value("so_name", "libglobal_mapping.so"),
+      "libglobal_mapping_reloc.so");
   global_mapping["enable_imu"] =
     declare_and_get<bool>(node, "global_mapping.enable_imu", global_mapping.value("enable_imu", true));
   global_mapping["enable_optimization"] =
@@ -257,7 +303,7 @@ std::string create_effective_config_from_ros_params(
   global_mapping["between_registration_type"] =
     declare_and_get<std::string>(node, "global_mapping.between_registration_type", global_mapping.value("between_registration_type", "GICP"));
   global_mapping["registration_error_factor_type"] =
-    declare_and_get<std::string>(node, "global_mapping.registration_error_factor_type", global_mapping.value("registration_error_factor_type", "VGICP"));
+    declare_and_get<std::string>(node, "global_mapping.registration_error_factor_type", global_mapping.value("registration_error_factor_type", "VGICP_GPU"));
   global_mapping["randomsampling_rate"] =
     declare_and_get<double>(node, "global_mapping.randomsampling_rate", global_mapping.value("randomsampling_rate", 1.0));
   global_mapping["submap_voxel_resolution"] =
@@ -279,11 +325,11 @@ std::string create_effective_config_from_ros_params(
   global_mapping["use_isam2_dogleg"] =
     declare_and_get<bool>(node, "global_mapping.use_isam2_dogleg", global_mapping.value("use_isam2_dogleg", false));
   global_mapping["isam2_relinearize_skip"] =
-    declare_and_get<int>(node, "global_mapping.isam2_relinearize_skip", global_mapping.value("isam2_relinearize_skip", 1));
+    declare_and_get<int>(node, "global_mapping.isam2_relinearize_skip", global_mapping.value("isam2_relinearize_skip", 10));
   global_mapping["isam2_relinearize_thresh"] =
     declare_and_get<double>(node, "global_mapping.isam2_relinearize_thresh", global_mapping.value("isam2_relinearize_thresh", 0.1));
   global_mapping["gpu_memory_offload_mb"] =
-    declare_and_get<int>(node, "global_mapping.gpu_memory_offload_mb", global_mapping.value("gpu_memory_offload_mb", 0));
+    declare_and_get<int>(node, "global_mapping.gpu_memory_offload_mb", global_mapping.value("gpu_memory_offload_mb", 2560));
   // localization.* only means anything to libglobal_mapping_reloc.so - harmless
   // (unused) clutter in config_global_mapping.json when so_name selects the
   // plain libglobal_mapping.so instead, so it's fine to always write it out.
@@ -308,13 +354,16 @@ std::string create_effective_config_from_ros_params(
     declare_and_get<double>(node, "localization.prebuilt_submap_pin_precision", localization.value("prebuilt_submap_pin_precision", 1e8));
   save_json(effective_path / "config_global_mapping.json", config_global_mapping);
 
-  // Fields NOT listed here (distance_far_thresh, downsample_resolution,
-  // random_downsample_target) genuinely differ between G1's mapping and
-  // localization profiles - see the global_mapping note above.
   auto config_preprocess = load_json(effective_path / "config_preprocess.json");
   auto& preprocess = config_preprocess["preprocess"];
   preprocess["distance_near_thresh"] =
     declare_and_get<double>(node, "preprocess.distance_near_thresh", preprocess.value("distance_near_thresh", 1.0));
+  preprocess["distance_far_thresh"] =
+    declare_and_get<double>(node, "preprocess.distance_far_thresh", preprocess.value("distance_far_thresh", 50.0));
+  preprocess["downsample_resolution"] =
+    declare_and_get<double>(node, "preprocess.downsample_resolution", preprocess.value("downsample_resolution", 0.3));
+  preprocess["random_downsample_target"] =
+    declare_and_get<int>(node, "preprocess.random_downsample_target", preprocess.value("random_downsample_target", 10000));
   preprocess["use_random_grid_downsampling"] =
     declare_and_get<bool>(node, "preprocess.use_random_grid_downsampling", preprocess.value("use_random_grid_downsampling", false));
   preprocess["random_downsample_rate"] =
@@ -333,8 +382,6 @@ std::string create_effective_config_from_ros_params(
     declare_and_get<int>(node, "preprocess.num_threads", preprocess.value("num_threads", 4));
   save_json(effective_path / "config_preprocess.json", config_preprocess);
 
-  // registration_error_factor_type genuinely differs between G1's mapping and
-  // localization profiles - see the global_mapping note above.
   auto config_sub_mapping = load_json(effective_path / "config_sub_mapping.json");
   auto& sub_mapping = config_sub_mapping["sub_mapping"];
   sub_mapping["so_name"] =
@@ -360,7 +407,7 @@ std::string create_effective_config_from_ros_params(
   sub_mapping["between_registration_type"] =
     declare_and_get<std::string>(node, "sub_mapping.between_registration_type", sub_mapping.value("between_registration_type", "GICP"));
   sub_mapping["registration_error_factor_type"] =
-    declare_and_get<std::string>(node, "sub_mapping.registration_error_factor_type", sub_mapping.value("registration_error_factor_type", "VGICP"));
+    declare_and_get<std::string>(node, "sub_mapping.registration_error_factor_type", sub_mapping.value("registration_error_factor_type", "VGICP_GPU"));
   sub_mapping["keyframe_randomsampling_rate"] =
     declare_and_get<double>(node, "sub_mapping.keyframe_randomsampling_rate", sub_mapping.value("keyframe_randomsampling_rate", 1.0));
   sub_mapping["keyframe_voxel_resolution"] =
@@ -442,13 +489,242 @@ std::string create_effective_config_from_ros_params(
   return effective_path.string();
 }
 
+// resple_bridge's SharedSplineState singleton (glim_ext_resple_bridge, a
+// separate .so) tracks RESPLE's own knot indexing entirely in this
+// process's memory. If glim_ros is a fresh process (its own
+// already-activated-once guard forced a respawn) but resple has been
+// running continuously since well before that -- its own knot/index
+// counters already huge -- the bridge's fresh, zero-based tracking desyncs
+// against them: updateKnots() ends up always appending instead of refining
+// overlapping windows, and the spline's local-index <-> real-time
+// correspondence drifts. Confirmed live: this silently produces noisy,
+// biased odometry (10+ deg roll error, several deg of pitch/yaw jitter
+// while genuinely stationary) rather than any visible error.
+//
+// Fix: whenever glim_ros configures, check how long resple's current
+// process has actually been alive (via its one-shot, transient_local
+// /start_time message) and, if it clearly didn't just boot alongside this
+// same glim_ros process, force it through a full restart first -- so both
+// sides' indexing resets to zero together. Runs on a throwaway node of its
+// own: GlimROS's own SingleThreadedExecutor is busy inside on_configure()
+// right now and can't also process the responses this needs.
+void ensure_resple_fresh_before_configuring() {
+  constexpr auto kStartTimeWaitTimeout = std::chrono::milliseconds(3000);
+  constexpr auto kServiceTimeout = std::chrono::milliseconds(2000);
+  // RESPLE's own on_deactivate() can block for up to 5s on a bounded-join
+  // wait for its processing thread (RESPLE.cpp's join_processing_thread_with_
+  // timeout()) before it can return success or failure -- a 2s client-side
+  // timeout on THIS specific call would give up and read that as a failure
+  // while RESPLE is still within its own legitimate wait, not actually stuck.
+  // Confirmed live: this was silently short-circuiting the whole restart
+  // sequence on every deactivate that took longer than 2s, even when RESPLE
+  // was behaving normally. Give this one call more room than RESPLE's own
+  // bound, so a real timeout here only fires past RESPLE's own guard.
+  constexpr auto kDeactivateTimeout = std::chrono::milliseconds(7000);
+  constexpr auto kRespawnPollTimeout = std::chrono::milliseconds(30000);
+  constexpr auto kRespawnPollInterval = std::chrono::milliseconds(500);
+  // How old resple's /start_time needs to be for us to conclude it's a
+  // stale, long-running process rather than one that just finished
+  // configuring+activating moments ago as part of this same cold start
+  // (livox_driver -> resple -> glim_ros is the normal boot order, and
+  // resple reaching ACTIVE typically takes well under this).
+  constexpr int64_t kStaleThresholdNs = 8'000'000'000;  // 8s
+  // kSyncedMarkerPath (file-scope, above): written by resple_start_time_
+  // changed_callback() right before it forces our own respawn -- lets the
+  // FRESH process that comes back know "the resple instance I'm about to
+  // check was already confirmed fresh, that's exactly why I'm restarting"
+  // instead of re-deriving the same conclusion from age alone. Without this,
+  // a self-restart triggered by that monitor can still see resple as
+  // "stale" here (glim_ros's own respawn+reconfigure cycle alone can take
+  // longer than kStaleThresholdNs), causing one needless extra resple
+  // restart right after the one that was already just confirmed to work.
+
+  auto probe_node = std::make_shared<rclcpp::Node>("glim_ros_resple_freshness_probe");
+  rclcpp::executors::SingleThreadedExecutor exec;
+  exec.add_node(probe_node);
+  std::thread spin_thread([&exec]() { exec.spin(); });
+  bool stopped = false;
+  auto stop_spinning = [&]() {
+    if (stopped) return;
+    stopped = true;
+    exec.cancel();
+    if (spin_thread.joinable()) {
+      spin_thread.join();
+    }
+  };
+
+  std::mutex m;
+  std::condition_variable cv;
+  std::optional<int64_t> start_time_ns;
+  auto sub = probe_node->create_subscription<std_msgs::msg::Int64>(
+    "/start_time", rclcpp::QoS(1).transient_local(),
+    [&](const std_msgs::msg::Int64::SharedPtr msg) {
+      {
+        std::lock_guard<std::mutex> lk(m);
+        start_time_ns = msg->data;
+      }
+      cv.notify_one();
+    });
+
+  {
+    std::unique_lock<std::mutex> lk(m);
+    cv.wait_for(lk, kStartTimeWaitTimeout, [&] { return start_time_ns.has_value(); });
+  }
+
+  if (!start_time_ns.has_value()) {
+    spdlog::info("[glim_ros] resple /start_time not seen yet -- nothing stale to restart");
+    stop_spinning();
+    return;
+  }
+
+  {
+    std::ifstream marker_in(kSyncedMarkerPath);
+    int64_t marked_value = 0;
+    if (marker_in && (marker_in >> marked_value) && marked_value == *start_time_ns) {
+      spdlog::info(
+        "[glim_ros] resple's /start_time matches the value that triggered our "
+        "own last self-restart -- already confirmed fresh, skipping a redundant "
+        "restart");
+      stop_spinning();
+      return;
+    }
+  }
+
+  const int64_t now_ns = probe_node->now().nanoseconds();
+  const int64_t age_ns = now_ns - *start_time_ns;
+  if (age_ns < kStaleThresholdNs) {
+    spdlog::info("[glim_ros] resple started {:.1f}s ago -- fresh, booted alongside this process", age_ns / 1e9);
+    stop_spinning();
+    return;
+  }
+
+  spdlog::warn(
+    "[glim_ros] resple has been running for {:.1f}s already while this glim_ros "
+    "process just started fresh -- its spline/knot indexing would desync "
+    "against a fresh consumer, so restarting resple before proceeding",
+    age_ns / 1e9);
+
+  using lifecycle_msgs::msg::State;
+  using lifecycle_msgs::msg::Transition;
+  using ChangeState = lifecycle_msgs::srv::ChangeState;
+  using GetState = lifecycle_msgs::srv::GetState;
+
+  auto change_state_client = probe_node->create_client<ChangeState>("/resple/change_state");
+  auto get_state_client = probe_node->create_client<GetState>("/resple/get_state");
+
+  auto get_state = [&]() -> std::optional<uint8_t> {
+    if (!get_state_client->wait_for_service(kServiceTimeout)) {
+      return std::nullopt;
+    }
+    auto req = std::make_shared<GetState::Request>();
+    auto fut = get_state_client->async_send_request(req);
+    if (fut.wait_for(kServiceTimeout) != std::future_status::ready) {
+      return std::nullopt;
+    }
+    return fut.get()->current_state.id;
+  };
+
+  auto send_transition = [&](uint8_t transition_id, std::chrono::milliseconds timeout) -> bool {
+    if (!change_state_client->wait_for_service(timeout)) {
+      return false;
+    }
+    auto req = std::make_shared<ChangeState::Request>();
+    req->transition.id = transition_id;
+    auto fut = change_state_client->async_send_request(req);
+    if (fut.wait_for(timeout) != std::future_status::ready) {
+      return false;
+    }
+    return fut.get()->success;
+  };
+
+  const auto current_state = get_state();
+  if (!current_state.has_value() || *current_state != State::PRIMARY_STATE_ACTIVE) {
+    spdlog::info("[glim_ros] resple is not currently active -- nothing to restart");
+    stop_spinning();
+    return;
+  }
+
+  if (!send_transition(Transition::TRANSITION_DEACTIVATE, kDeactivateTimeout)) {
+    // Not fatal: this is exactly what happens when resple's own processData()
+    // hang guard fires during this same deactivate call. That guard now
+    // force-exits the process (_exit()) once its own 5s bounded-join gives
+    // up, and a process that has already exited can't send a service
+    // response to the request that triggered it -- so "no response" here is
+    // indistinguishable from, and just as fine as, a normal deactivate. The
+    // respawn-poll below is what actually confirms whether a fresh process
+    // shows up; treat this the same way the activate attempt below is
+    // already treated, not as a reason to give up.
+    spdlog::warn(
+      "[glim_ros] resple did not confirm deactivate -- possibly because its "
+      "own processData()-hang guard already fired and force-exited the "
+      "process mid-request; proceeding to check for a fresh process either way");
+  }
+
+  // Requesting activate again on what is still the SAME resple process is
+  // expected to fail or time out: resple has its own already-activated-once
+  // guard (ikd-tree double-Build() protection) that, on exactly this
+  // request, exits the process so respawn:true gives a fresh one. That is
+  // the intended outcome here, not an error.
+  if (!send_transition(Transition::TRANSITION_ACTIVATE, kServiceTimeout)) {
+    spdlog::info(
+      "[glim_ros] resple did not confirm activate after deactivate -- "
+      "expected if this tripped its own restart-on-reactivate guard; "
+      "waiting for a fresh process instead");
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + kRespawnPollTimeout;
+  bool respawned = false;
+  while (std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(kRespawnPollInterval);
+    const auto state = get_state();
+    if (state.has_value() && *state == State::PRIMARY_STATE_UNCONFIGURED) {
+      respawned = true;
+      break;
+    }
+  }
+
+  if (!respawned) {
+    spdlog::error(
+      "[glim_ros] resple did not respawn as a fresh process within {}ms -- "
+      "proceeding anyway, odometry may be corrupted",
+      kRespawnPollTimeout.count());
+    stop_spinning();
+    return;
+  }
+
+  if (!send_transition(Transition::TRANSITION_CONFIGURE, kServiceTimeout) ||
+      !send_transition(Transition::TRANSITION_ACTIVATE, kServiceTimeout)) {
+    spdlog::error(
+      "[glim_ros] failed to bring the fresh resple process back to active "
+      "-- proceeding anyway, odometry may be corrupted");
+    stop_spinning();
+    return;
+  }
+
+  spdlog::info("[glim_ros] resple restarted fresh -- proceeding with our own configure");
+  stop_spinning();
+}
+
 }  // namespace
 
-GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options) {
+GlimROS::GlimROS(const rclcpp::NodeOptions& options) : rclcpp_lifecycle::LifecycleNode("glim_ros", options) {
+  bond_topic_name_ = this->declare_parameter<std::string>("bond_topic_name", "/bond");
+  bond_id_ = this->declare_parameter<std::string>("bond_id", "glim_ros");
+  enable_bond_ = this->declare_parameter<bool>("enable_bond", true);
+  bond_heartbeat_period_s_ = this->declare_parameter<double>("bond_heartbeat_period_s", 0.1);
+  bond_heartbeat_timeout_s_ = this->declare_parameter<double>("bond_heartbeat_timeout_s", 1.0);
+}
+
+GlimROS::CallbackReturn GlimROS::on_configure(const rclcpp_lifecycle::State&) {
   // Setup logger
   auto logger = spdlog::stdout_color_mt("glim");
   logger->sinks().push_back(get_ringbuffer_sink());
   spdlog::set_default_logger(logger);
+
+  // Must run before anything below subscribes to resple's stream: see the
+  // function's own comment for why a stale, still-running resple process
+  // needs a coupled restart whenever THIS glim_ros process is fresh.
+  ensure_resple_fresh_before_configuring();
 
   bool debug = false;
   this->declare_parameter<bool>("debug", false);
@@ -542,6 +818,7 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
   if (config_ros.param<bool>("glim_ros", "enable_global_mapping", true)) {
     const std::string global_mapping_so_name =
       glim::Config(glim::GlobalConfig::get_config_path("config_global_mapping")).param<std::string>("global_mapping", "so_name", "libglobal_mapping.so");
+    is_localization_mode_ = global_mapping_so_name.find("global_mapping_reloc") != std::string::npos;
     if (!global_mapping_so_name.empty()) {
       spdlog::info("load {}", global_mapping_so_name);
       auto global = GlobalMappingBase::load_module(global_mapping_so_name);
@@ -613,10 +890,164 @@ GlimROS::GlimROS(const rclcpp::NodeOptions& options) : Node("glim_ros", options)
     sub->create_subscriber(*this);
   }
 
-  // Start timer
+  spdlog::debug("initialized");
+  return CallbackReturn::SUCCESS;
+}
+
+GlimROS::CallbackReturn GlimROS::on_activate(const rclcpp_lifecycle::State&) {
+  // See the note on activated_once_ in glim_ros.hpp -- a reactivation on the
+  // same still-running process isn't a proven-safe path for GLIM's
+  // background estimation/mapping threads, so refuse it and force a full
+  // process restart via respawn:true instead of risking it, same as RESPLE.
+  if (activated_once_) {
+    RCLCPP_ERROR(
+      this->get_logger(),
+      "Refusing to activate: this process has already activated glim_ros once. "
+      "Reactivating in place is not a proven-safe path for GLIM's background "
+      "estimation/mapping threads. Exiting this process so respawn:true gives "
+      "a fresh one instead of leaving this node stuck inactive.");
+    rclcpp::shutdown();
+    // rclcpp::shutdown() alone does NOT terminate the process: main()'s
+    // glim->wait() unconditionally calls odometry_estimation->join(), and
+    // that background thread has no way to know it should stop early (it's
+    // built to run to natural completion, e.g. end of a bag), so it just
+    // keeps consuming LiDAR data and computing forever with a dead ROS
+    // context -- permanently unable to publish anything again, but never
+    // actually exiting for respawn:true to kick in. Force a real, immediate
+    // process exit instead of relying on main()'s normal unwind.
+    _exit(1);
+  }
+  activated_once_ = true;
+
+  for (const auto& ext_module : extension_modules) {
+    auto ext_module_ros = std::dynamic_pointer_cast<ExtensionModuleROS2>(ext_module);
+    if (ext_module_ros) {
+      ext_module_ros->on_activate();
+    }
+  }
+
+  // See the long comment on resple_start_time_watch_sub_ in glim_ros.hpp:
+  // ensure_resple_fresh_before_configuring() only protects against resple
+  // ALREADY being stale at our own configure time -- this catches resple
+  // restarting independently anytime after that, for the rest of this
+  // process's life.
+  resple_start_time_baseline_.reset();
+  resple_start_time_watch_sub_ = this->create_subscription<std_msgs::msg::Int64>(
+    "/start_time", rclcpp::QoS(1).transient_local(),
+    [this](const std_msgs::msg::Int64::SharedPtr msg) { resple_start_time_changed_callback(msg); });
+
   timer = this->create_wall_timer(std::chrono::milliseconds(1), [this]() { timer_callback(); });
 
-  spdlog::debug("initialized");
+  start_bond();
+  return CallbackReturn::SUCCESS;
+}
+
+void GlimROS::resple_start_time_changed_callback(const std_msgs::msg::Int64::SharedPtr msg) {
+  if (!resple_start_time_baseline_.has_value()) {
+    // First delivery: transient_local means this could be replaying the
+    // value from whichever resple process ensure_resple_fresh_before_
+    // configuring() already confirmed fresh moments ago. Just record it as
+    // the baseline for this activation -- nothing to react to yet.
+    resple_start_time_baseline_ = msg->data;
+    return;
+  }
+
+  if (msg->data == *resple_start_time_baseline_) {
+    return;
+  }
+
+  RCLCPP_ERROR(
+    this->get_logger(),
+    "resple's /start_time changed while this glim_ros process is still "
+    "active (was %ld, now %ld) -- resple restarted on its own and our "
+    "spline bridge has no way to resync against a running process. Exiting "
+    "this process so respawn:true gives a fresh one that will re-sync "
+    "against it, instead of silently freezing on stale tracking.",
+    static_cast<long>(*resple_start_time_baseline_), static_cast<long>(msg->data));
+
+  // Tell the fresh process that's about to come back "this exact resple
+  // instance is the one that made me restart -- you don't need to restart
+  // it again". See kSyncedMarkerPath's comment for why this exists at all.
+  // Best-effort: if this write fails, ensure_resple_fresh_before_
+  // configuring() just falls back to its normal age-based check, which is
+  // slower (one redundant restart) but not wrong.
+  {
+    std::ofstream marker_out(kSyncedMarkerPath, std::ios::trunc);
+    marker_out << msg->data;
+  }
+
+  rclcpp::shutdown();
+  _exit(1);
+}
+
+GlimROS::CallbackReturn GlimROS::on_deactivate(const rclcpp_lifecycle::State&) {
+  stop_bond();
+  timer.reset();
+  resple_start_time_watch_sub_.reset();
+
+  for (const auto& ext_module : extension_modules) {
+    auto ext_module_ros = std::dynamic_pointer_cast<ExtensionModuleROS2>(ext_module);
+    if (ext_module_ros) {
+      ext_module_ros->on_deactivate();
+    }
+  }
+
+  return CallbackReturn::SUCCESS;
+}
+
+GlimROS::CallbackReturn GlimROS::on_cleanup(const rclcpp_lifecycle::State&) {
+  imu_sub.reset();
+  points_sub.reset();
+#ifdef BUILD_WITH_CV_BRIDGE
+  image_sub = image_transport::Subscriber();
+#endif
+  return CallbackReturn::SUCCESS;
+}
+
+GlimROS::CallbackReturn GlimROS::on_shutdown(const rclcpp_lifecycle::State&) {
+  stop_bond();
+  timer.reset();
+  return CallbackReturn::SUCCESS;
+}
+
+void GlimROS::start_bond() {
+  if (!enable_bond_) {
+    return;
+  }
+
+  lifecycle_bond_ = std::make_unique<bond::Bond>(
+    bond_topic_name_, bond_id_,
+    get_node_base_interface(),
+    get_node_logging_interface(),
+    get_node_parameters_interface(),
+    get_node_timers_interface(),
+    get_node_topics_interface(),
+    std::bind(&GlimROS::bond_broken_callback, this),
+    std::bind(&GlimROS::bond_formed_callback, this));
+  lifecycle_bond_->setHeartbeatPeriod(bond_heartbeat_period_s_);
+  lifecycle_bond_->setHeartbeatTimeout(bond_heartbeat_timeout_s_);
+  lifecycle_bond_->start();
+}
+
+void GlimROS::stop_bond() {
+  if (lifecycle_bond_) {
+    lifecycle_bond_->breakBond();
+    lifecycle_bond_.reset();
+  }
+  bond_formed_ = false;
+  bond_broken_ = false;
+}
+
+void GlimROS::bond_formed_callback() {
+  bond_formed_ = true;
+  bond_broken_ = false;
+  RCLCPP_INFO(this->get_logger(), "Lifecycle bond formed on %s", bond_topic_name_.c_str());
+}
+
+void GlimROS::bond_broken_callback() {
+  bond_formed_ = false;
+  bond_broken_ = true;
+  RCLCPP_WARN(this->get_logger(), "Lifecycle bond broken on %s", bond_topic_name_.c_str());
 }
 
 GlimROS::~GlimROS() {
@@ -698,6 +1129,15 @@ void GlimROS::image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) 
 #endif
 
 size_t GlimROS::points_callback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg) {
+  // TEMPORARY DEBUG: proves whether this callback is still being invoked by
+  // the executor at all during a freeze (vs. being invoked but stuck/rejecting
+  // downstream, which would show up as the warnings a few lines below
+  // instead). info level, not trace, so it's visible without debug:true.
+  static uint64_t points_callback_hit_count = 0;
+  if (++points_callback_hit_count % 20 == 1) {
+    spdlog::info("[DEBUG] points_callback() alive, hit #{} stamp={}.{}", points_callback_hit_count, msg->header.stamp.sec, msg->header.stamp.nanosec);
+  }
+
   spdlog::trace("points: {}.{}", msg->header.stamp.sec, msg->header.stamp.nanosec);
   if (!GlobalConfig::instance()->has_param("meta", "lidar_frame_id")) {
     spdlog::debug("auto-detecting LiDAR frame ID: {}", msg->header.frame_id);
@@ -802,6 +1242,19 @@ void GlimROS::wait(bool auto_quit) {
 }
 
 void GlimROS::save(const std::string& path) {
+  if (is_localization_mode_) {
+    // Localization mode loads its reference map FROM this same dump_path at
+    // startup (LocalizationReloc::ensure_reference_loaded()). Writing a live
+    // session's own global-mapping state (pinned reference submaps plus
+    // whatever ephemeral/synthetic submaps that session added) back to that
+    // same path would silently overwrite the reference map on every shutdown
+    // -- including the guard-forced restarts in glim_ros.cpp's on_activate(),
+    // which happen far more often than an intentional map re-save. There is
+    // nothing worth persisting from a localization run, so this is a no-op.
+    saved = true;
+    return;
+  }
+
   if (global_mapping) global_mapping->save(path);
   for (auto& module : extension_modules) {
     module->at_exit(path);
