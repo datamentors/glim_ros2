@@ -352,6 +352,22 @@ std::string create_effective_config_from_ros_params(
     declare_and_get<int>(node, "localization.max_localization_submaps", localization.value("max_localization_submaps", 4));
   localization["prebuilt_submap_pin_precision"] =
     declare_and_get<double>(node, "localization.prebuilt_submap_pin_precision", localization.value("prebuilt_submap_pin_precision", 1e8));
+  // Environment/scene-dependent tuning, not fixed algorithm defaults (per
+  // review feedback) -- expose for per-robot override the same as every
+  // other localization.* field above, rather than leaving them settable
+  // only by editing the shipped package JSON.
+  localization["enable_range_weighted_covariances"] =
+    declare_and_get<bool>(node, "localization.enable_range_weighted_covariances", localization.value("enable_range_weighted_covariances", false));
+  localization["range_weight_near_threshold"] =
+    declare_and_get<double>(node, "localization.range_weight_near_threshold", localization.value("range_weight_near_threshold", 5.0));
+  localization["range_weight_power"] =
+    declare_and_get<double>(node, "localization.range_weight_power", localization.value("range_weight_power", 2.0));
+  localization["enable_trimmed_icp_prerefine"] =
+    declare_and_get<bool>(node, "localization.enable_trimmed_icp_prerefine", localization.value("enable_trimmed_icp_prerefine", false));
+  localization["icp_max_iterations"] =
+    declare_and_get<int>(node, "localization.icp_max_iterations", localization.value("icp_max_iterations", 15));
+  localization["icp_trim_fraction"] =
+    declare_and_get<double>(node, "localization.icp_trim_fraction", localization.value("icp_trim_fraction", 0.3));
   save_json(effective_path / "config_global_mapping.json", config_global_mapping);
 
   auto config_preprocess = load_json(effective_path / "config_preprocess.json");
