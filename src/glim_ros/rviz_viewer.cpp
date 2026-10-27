@@ -435,6 +435,9 @@ void RvizViewer::odometry_new_frame(const EstimationFrame::ConstPtr& new_frame, 
 }
 
 void RvizViewer::globalmap_on_update_submaps(const std::vector<SubMap::Ptr>& submaps) {
+  if (submaps.empty()) {
+    return;
+  }
   const SubMap::ConstPtr latest_submap = submaps.back();
 
   const double stamp_endpoint_R = latest_submap->odom_frames.back()->stamp;
@@ -444,15 +447,20 @@ void RvizViewer::globalmap_on_update_submaps(const std::vector<SubMap::Ptr>& sub
     trajectory->update_anchor(stamp_endpoint_R, T_world_endpoint_R);
   }
 
+  if (!map_pub->get_subscription_count()) {
+    return;
+  }
+
+  // Keep clouds paired with the poses from this update, not historical indices.
+  std::vector<gtsam_points::PointCloud::ConstPtr> submap_clouds(submaps.size());
   std::vector<Eigen::Isometry3d, Eigen::aligned_allocator<Eigen::Isometry3d>> submap_poses(submaps.size());
-  for (int i = 0; i < submaps.size(); i++) {
+  for (size_t i = 0; i < submaps.size(); i++) {
+    submap_clouds[i] = submaps[i]->frame;
     submap_poses[i] = submaps[i]->T_world_origin;
   }
 
   // Invoke a submap concatenation task in the RvizViewer thread
-  invoke([this, latest_submap, submap_poses] {
-    this->submaps.push_back(latest_submap->frame);
-
+  invoke([this, submap_clouds = std::move(submap_clouds), submap_poses = std::move(submap_poses)] {
     if (!map_pub->get_subscription_count()) {
       return;
     }
@@ -466,8 +474,8 @@ void RvizViewer::globalmap_on_update_submaps(const std::vector<SubMap::Ptr>& sub
 
     logger->warn("Publishing global map is computationally demanding and not recommended");
 
-    int total_num_points = 0;
-    for (const auto& submap : this->submaps) {
+    size_t total_num_points = 0;
+    for (const auto& submap : submap_clouds) {
       total_num_points += submap->size();
     }
 
@@ -477,9 +485,9 @@ void RvizViewer::globalmap_on_update_submaps(const std::vector<SubMap::Ptr>& sub
     merged->points_storage.resize(total_num_points);
     merged->points = merged->points_storage.data();
 
-    int begin = 0;
-    for (int i = 0; i < this->submaps.size(); i++) {
-      const auto& submap = this->submaps[i];
+    size_t begin = 0;
+    for (size_t i = 0; i < submap_clouds.size(); i++) {
+      const auto& submap = submap_clouds[i];
       std::transform(submap->points, submap->points + submap->size(), merged->points + begin, [&](const Eigen::Vector4d& p) { return submap_poses[i] * p; });
       begin += submap->size();
     }

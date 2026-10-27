@@ -103,4 +103,12 @@ if(BUILD_WITH_VIEWER)
   )
 endif()
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(rviz_viewer_test test/rviz_viewer_test.cpp TIMEOUT 90)
+  target_include_directories(rviz_viewer_test PRIVATE include)
+  target_link_libraries(rviz_viewer_test rviz_viewer glim::glim)
+  ament_target_dependencies(rviz_viewer_test rclcpp rclcpp_lifecycle sensor_msgs geometry_msgs)
+endif()
+
 ament_auto_package()
